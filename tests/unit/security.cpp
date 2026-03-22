@@ -199,4 +199,65 @@ TEST_CASE("C3: faccessat should respect permission checks", "[Security]")
 	}
 }
 
+// =============================================================================
+// H2: Fork shares arena pointer, bypassing Copy-on-Write
+//
+// When a machine is forked with use_memory_arena enabled, the child gets
+// the parent's arena data pointer directly. Writes through the arena
+// fast-path in the child corrupt the parent's memory.
+// =============================================================================
+
+TEST_CASE("H2: Fork with arena should not corrupt parent memory", "[Security]")
+{
+	const auto binary = build_and_load(R"M(
+	static volatile int value = 0;
+
+	__attribute__((used, retain))
+	void set_value(int v) {
+		value = v;
+	}
+
+	__attribute__((used, retain))
+	int get_value() {
+		return value;
+	}
+
+	int main() {
+		value = 100;
+		return 666;
+	})M");
+
+	riscv::Machine<RISCV64> machine { binary, {
+		.memory_max = MAX_MEMORY,
+		.use_memory_arena = true,
+	} };
+	machine.setup_linux_syscalls();
+	machine.setup_linux(
+		{"security_test"},
+		{"LC_TYPE=C", "LC_ALL=C", "USER=root"});
+
+	machine.simulate(MAX_INSTRUCTIONS);
+	REQUIRE(machine.return_value<int>() == 666);
+
+	// Parent has value=100
+	int parent_val = machine.vmcall("get_value");
+	REQUIRE(parent_val == 100);
+
+	// Fork with arena enabled
+	{
+		riscv::Machine<RISCV64> fork { machine, {
+			.use_memory_arena = true,
+		} };
+
+		// Child should see value=100
+		int child_val = fork.vmcall("get_value");
+		REQUIRE(child_val == 100);
+
+		// Child writes value=999
+		fork.vmcall("set_value", 999);
+
+		// Child should see its own write
+		child_val = fork.vmcall("get_value");
+		REQUIRE(child_val == 999);
+	}
 

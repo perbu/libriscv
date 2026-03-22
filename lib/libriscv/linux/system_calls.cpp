@@ -593,6 +593,21 @@ static void syscall_fcntl(Machine<W>& machine)
 
 	if (machine.has_file_descriptors()) {
 		real_fd = machine.fds().translate(vfd);
+		// Only allow commands with integer arguments.
+		// Commands like F_GETLK/F_SETLK take pointer arguments —
+		// guest values must not be forwarded as host pointers.
+		switch (cmd) {
+		case F_GETFD:
+		case F_SETFD:
+		case F_GETFL:
+		case F_SETFL:
+		case F_DUPFD:
+		case F_DUPFD_CLOEXEC:
+			break;
+		default:
+			machine.set_result(-ENOSYS);
+			return;
+		}
 		int res = fcntl(real_fd, cmd, arg1, arg2, arg3);
 		machine.set_result_or_error(res);
 	} else {

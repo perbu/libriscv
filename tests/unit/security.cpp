@@ -261,3 +261,51 @@ TEST_CASE("H2: Fork with arena should not corrupt parent memory", "[Security]")
 		REQUIRE(child_val == 999);
 	}
 
+	// Parent's value must still be 100 — not corrupted by child write
+	parent_val = machine.vmcall("get_value");
+	INFO("Parent value after fork write: " << parent_val
+		<< (parent_val != 100 ? " (CORRUPTED BY CHILD)" : " (correct)"));
+	REQUIRE(parent_val == 100);
+}
+
+// =============================================================================
+// H4: fcntl passes guest arguments directly to host
+//
+// Same class of bug as C1 (ioctl). Commands like F_GETLK, F_SETLK expect
+// pointer arguments. Guest register values are passed as-is to the host
+// fcntl(), where they'd be interpreted as host pointers.
+// =============================================================================
+
+TEST_CASE("H4: fcntl with pointer-taking command should be denied", "[Security]")
+{
+	const auto binary = build_and_load(R"M(
+	int main() {
+		return 0;
+	})M");
+
+	riscv::Machine<RISCV64> machine { binary, { .memory_max = MAX_MEMORY } };
+	machine.setup_linux_syscalls(true);
+	machine.setup_linux(
+		{"security_test"},
+		{"LC_TYPE=C", "LC_ALL=C", "USER=root"});
+	machine.fds().permit_filesystem = true;
+
+	machine.simulate(MAX_INSTRUCTIONS);
+
+	// Invoke fcntl (syscall 25) with F_GETLK (cmd=5), which expects
+	// a pointer to struct flock. We pass a crafted guest value that
+	// would be a wild host pointer if forwarded.
+	auto& cpu = machine.cpu;
+	cpu.reg(riscv::REG_ARG0) = 1;          // fd = stdout
+	cpu.reg(riscv::REG_ARG1) = 5;          // F_GETLK — takes pointer arg
+	cpu.reg(riscv::REG_ARG2) = 0xDEAD0000; // would be host pointer if forwarded
+	machine.system_call(25);
+
+	const auto result = machine.return_value<int>();
+	const bool was_denied = (result == -ENOSYS || result == -EPERM || result == -EINVAL);
+	// If forwarded to host fcntl(), result would be -EFAULT (bad address)
+	// or potentially a crash.
+	INFO("fcntl F_GETLK result: " << result
+		<< (was_denied ? " (denied)" : " (FORWARDED TO HOST)"));
+	REQUIRE(was_denied);
+}
